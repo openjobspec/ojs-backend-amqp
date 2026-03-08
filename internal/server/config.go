@@ -9,7 +9,8 @@ type Config struct {
 	commonconfig.BaseConfig
 
 	// AMQP connection
-	AMQPURL string
+	AMQPURL     string
+	PersistPath string
 }
 
 // LoadConfig reads configuration from environment variables with defaults.
@@ -17,7 +18,8 @@ func LoadConfig() Config {
 	base := commonconfig.LoadBaseConfig()
 
 	return Config{
-		BaseConfig: base,
-		AMQPURL:    commonconfig.GetEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		BaseConfig:  base,
+		AMQPURL:     commonconfig.GetEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
+		PersistPath: commonconfig.GetEnv("OJS_PERSIST", ""),
 	}
 }

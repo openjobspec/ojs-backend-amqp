@@ -1,23 +1,90 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	commonapi "github.com/openjobspec/ojs-go-backend-common/api"
 	commoncore "github.com/openjobspec/ojs-go-backend-common/core"
+	"github.com/openjobspec/ojs-go-backend-common/httputil"
+	commonmw "github.com/openjobspec/ojs-go-backend-common/middleware"
 	"github.com/openjobspec/ojs-go-backend-common/registry"
+
+	"github.com/openjobspec/ojs-backend-amqp/internal/metrics"
 )
 
+// routerConfig holds optional router configuration.
+type routerConfig struct {
+	eventLister EventLister
+}
+
+// RouterOption configures optional router behavior.
+type RouterOption func(*routerConfig)
+
+// WithEventLister enables the GET /ojs/v1/events endpoint.
+func WithEventLister(el EventLister) RouterOption {
+	return func(c *routerConfig) { c.eventLister = el }
+}
+
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		next.ServeHTTP(ww, r)
+		duration := time.Since(start).Seconds()
+
+		path := "unknown"
+		if rctx := chi.RouteContext(r.Context()); rctx != nil && rctx.RoutePattern() != "" {
+			path = rctx.RoutePattern()
+		}
+
+		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, path, fmt.Sprintf("%d", ww.Status())).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(r.Method, path, fmt.Sprintf("%d", ww.Status())).Observe(duration)
+	})
+}
+
+// EventLister provides queryable access to stored events.
+type EventLister interface {
+	ListEvents(types []string, queues []string, limit int) []map[string]any
+}
+
 // NewRouter creates the HTTP router with all OJS routes.
-func NewRouter(backend commoncore.Backend, cfg Config, publisher commoncore.EventPublisher, subscriber commoncore.EventSubscriber) http.Handler {
+func NewRouter(backend commoncore.Backend, cfg Config, publisher commoncore.EventPublisher, subscriber commoncore.EventSubscriber, opts ...RouterOption) http.Handler {
+	var routerCfg routerConfig
+	for _, o := range opts {
+		o(&routerCfg)
+	}
+	metrics.Init("0.2.0", "amqp")
+
 	r := chi.NewRouter()
 
 	// Middleware stack
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RealIP)
+	r.Use(metricsMiddleware)
+	r.Use(commonmw.OJSHeaders)
+
+	// Authentication: OIDC JWT takes precedence over API key
+	skipPaths := []string{"/metrics", "/ojs/v1/health", "/healthz", "/readyz"}
+	if cfg.OIDCIssuer != "" {
+		r.Use(commonmw.JWTAuth(commonmw.OIDCConfig{
+			IssuerURL: cfg.OIDCIssuer,
+			Audience:  cfg.OIDCClientID,
+			SkipPaths: skipPaths,
+		}))
+	} else if cfg.APIKey != "" {
+		r.Use(commonmw.KeyAuth(cfg.APIKey, skipPaths...))
+	}
+
+	// Prometheus metrics endpoint
+	r.Handle("/metrics", promhttp.Handler())
 
 	// Create handlers from shared backend-common
 	jobHandler := commonapi.NewJobHandler(backend)
@@ -105,6 +172,48 @@ func NewRouter(backend commoncore.Backend, cfg Config, publisher commoncore.Even
 		sseHandler := commonapi.NewSSEHandler(backend, subscriber)
 		r.Get("/ojs/v1/jobs/{id}/events", sseHandler.JobEvents)
 		r.Get("/ojs/v1/queues/{name}/events", sseHandler.QueueEvents)
+	}
+
+	// Events list endpoint (GET /ojs/v1/events?types=...&queues=...&limit=...)
+	if routerCfg.eventLister != nil {
+		r.Get("/ojs/v1/events", func(w http.ResponseWriter, r *http.Request) {
+			var types, queues []string
+			if t := r.URL.Query().Get("types"); t != "" {
+				types = strings.Split(t, ",")
+			}
+			if q := r.URL.Query().Get("queues"); q != "" {
+				queues = strings.Split(q, ",")
+			}
+			limit := 100
+			if l := r.URL.Query().Get("limit"); l != "" {
+				if n, err := strconv.Atoi(l); err == nil && n > 0 {
+					limit = n
+				}
+			}
+
+			events := routerCfg.eventLister.ListEvents(types, queues, limit)
+			if events == nil {
+				events = []map[string]any{}
+			}
+			httputil.WriteJSON(w, http.StatusOK, map[string]any{"events": events})
+		})
+	}
+
+	// State reset endpoint for conformance testing
+	type resettable interface{ Reset() }
+	type logResettable interface{ ResetLog() }
+	if rb, ok := backend.(resettable); ok {
+		r.Post("/ojs/v1/admin/reset", func(w http.ResponseWriter, r *http.Request) {
+			rb.Reset()
+			if routerCfg.eventLister != nil {
+				if lr, ok := routerCfg.eventLister.(logResettable); ok {
+					lr.ResetLog()
+				}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"reset":true}`))
+		})
 	}
 
 	return r

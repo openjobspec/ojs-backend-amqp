@@ -7,108 +7,61 @@ import (
 	"log/slog"
 	"sync"
 	"time"
-
-	"github.com/openjobspec/ojs-go-backend-common/core"
 )
 
-// Backend is the subset of core.Backend needed by the scheduler.
-type Backend interface {
-	ListCron(ctx context.Context) ([]*core.CronJob, error)
-	Push(ctx context.Context, job *core.Job) (*core.Job, error)
+// SchedulerBackend defines the interface for background scheduling operations.
+type SchedulerBackend interface {
+	PromoteScheduled(ctx context.Context) error
+	PromoteRetries(ctx context.Context) error
+	RequeueStalled(ctx context.Context) error
+	FireCronJobs(ctx context.Context) error
+	PurgeExpired(ctx context.Context) error
 }
 
 // Scheduler runs background maintenance tasks.
 type Scheduler struct {
-	backend Backend
-	done    chan struct{}
-	wg      sync.WaitGroup
+	backend  SchedulerBackend
+	stop     chan struct{}
+	stopOnce sync.Once
 }
 
 // New creates a new scheduler.
-func New(backend Backend) *Scheduler {
+func New(backend SchedulerBackend) *Scheduler {
 	return &Scheduler{
 		backend: backend,
-		done:    make(chan struct{}),
+		stop:    make(chan struct{}),
 	}
 }
 
 // Start launches the background goroutines.
 func (s *Scheduler) Start() {
-	s.wg.Add(1)
-	go s.cronLoop()
-
+	go s.runLoop("scheduled-promoter", 1*time.Second, s.backend.PromoteScheduled)
+	go s.runLoop("retry-promoter", 200*time.Millisecond, s.backend.PromoteRetries)
+	go s.runLoop("stalled-reaper", 500*time.Millisecond, s.backend.RequeueStalled)
+	go s.runLoop("cron-scheduler", 10*time.Second, s.backend.FireCronJobs)
+	go s.runLoop("expired-purger", 60*time.Second, s.backend.PurgeExpired)
 	slog.Info("AMQP scheduler started")
 }
 
-// Stop gracefully shuts down all background goroutines.
+// Stop gracefully shuts down all background goroutines. Safe to call multiple times.
 func (s *Scheduler) Stop() {
-	close(s.done)
-	s.wg.Wait()
-	slog.Info("AMQP scheduler stopped")
+	s.stopOnce.Do(func() { close(s.stop) })
 }
 
-// cronLoop checks registered cron jobs every minute and fires any that are due.
-func (s *Scheduler) cronLoop() {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(30 * time.Second)
+func (s *Scheduler) runLoop(name string, interval time.Duration, fn func(context.Context) error) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-s.done:
+		case <-s.stop:
 			return
 		case <-ticker.C:
-			s.fireCrons()
-		}
-	}
-}
-
-func (s *Scheduler) fireCrons() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	crons, err := s.backend.ListCron(ctx)
-	if err != nil {
-		slog.Error("scheduler: list crons failed", "error", err)
-		return
-	}
-
-	now := time.Now().UTC()
-	for _, cron := range crons {
-		if !cron.Enabled {
-			continue
-		}
-
-		// Check if this cron should fire based on NextRunAt
-		if cron.NextRunAt == "" {
-			continue
-		}
-		nextRun, err := time.Parse(time.RFC3339, cron.NextRunAt)
-		if err != nil {
-			continue
-		}
-		if now.Before(nextRun) {
-			continue
-		}
-
-		// Fire the cron job
-		if cron.JobTemplate != nil {
-			job := &core.Job{
-				Type:  cron.JobTemplate.Type,
-				Args:  cron.JobTemplate.Args,
-				Queue: "default",
-				Tags:  []string{"cron:" + cron.Name},
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := fn(ctx); err != nil {
+				slog.Error("scheduler loop error", "loop", name, "error", err)
 			}
-			if cron.JobTemplate.Options != nil && cron.JobTemplate.Options.Queue != "" {
-				job.Queue = cron.JobTemplate.Options.Queue
-			}
-
-			if _, err := s.backend.Push(ctx, job); err != nil {
-				slog.Error("scheduler: fire cron failed", "name", cron.Name, "error", err)
-			} else {
-				slog.Debug("scheduler: fired cron job", "name", cron.Name, "type", job.Type)
-			}
+			cancel()
 		}
 	}
 }

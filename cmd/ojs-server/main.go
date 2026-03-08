@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -12,8 +13,14 @@ import (
 	amqpbackend "github.com/openjobspec/ojs-backend-amqp/internal/amqp"
 	"github.com/openjobspec/ojs-backend-amqp/internal/core"
 	"github.com/openjobspec/ojs-backend-amqp/internal/events"
+	ojsgrpc "github.com/openjobspec/ojs-backend-amqp/internal/grpc"
 	"github.com/openjobspec/ojs-backend-amqp/internal/scheduler"
 	"github.com/openjobspec/ojs-backend-amqp/internal/server"
+	"github.com/openjobspec/ojs-backend-amqp/internal/tracing"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/health"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/reflection"
 )
 
 func main() {
@@ -27,8 +34,21 @@ func main() {
 		slog.Warn("⚠️  RUNNING WITHOUT AUTHENTICATION — set OJS_API_KEY for production")
 	}
 
+	// Initialize OpenTelemetry tracing (no-op if not configured)
+	otelShutdown, err := tracing.Setup("ojs-backend-amqp")
+	if err != nil {
+		slog.Warn("failed to initialize tracing, continuing without it", "error", err)
+	} else {
+		defer otelShutdown()
+	}
+
 	// Create AMQP backend
-	backend, err := amqpbackend.New(cfg.AMQPURL)
+	var backendOpts []amqpbackend.Option
+	if cfg.PersistPath != "" {
+		backendOpts = append(backendOpts, amqpbackend.WithPersist(cfg.PersistPath))
+		slog.Info("persistence enabled", "path", cfg.PersistPath)
+	}
+	backend, err := amqpbackend.New(cfg.AMQPURL, backendOpts...)
 	if err != nil {
 		slog.Error("failed to initialize AMQP backend", "error", err)
 		os.Exit(1)
@@ -45,7 +65,7 @@ func main() {
 	defer broker.Close()
 
 	// Create HTTP server
-	router := server.NewRouter(backend, cfg, broker, broker)
+	router := server.NewRouter(backend, cfg, broker, broker, server.WithEventLister(broker))
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
@@ -63,6 +83,27 @@ func main() {
 		}
 	}()
 
+	// Start gRPC server
+	grpcServer := grpc.NewServer()
+	ojsgrpc.Register(grpcServer, backend, ojsgrpc.WithEventSubscriber(broker))
+	healthSrv := health.NewServer()
+	healthpb.RegisterHealthServer(grpcServer, healthSrv)
+	healthSrv.SetServingStatus("ojs.v1.OJSService", healthpb.HealthCheckResponse_SERVING)
+	reflection.Register(grpcServer)
+
+	go func() {
+		lis, err := net.Listen("tcp", ":"+cfg.GRPCPort)
+		if err != nil {
+			slog.Error("failed to listen for gRPC", "port", cfg.GRPCPort, "error", err)
+			os.Exit(1)
+		}
+		slog.Info("OJS gRPC server listening", "port", cfg.GRPCPort)
+		if err := grpcServer.Serve(lis); err != nil {
+			slog.Error("gRPC server error", "error", err)
+			os.Exit(1)
+		}
+	}()
+
 	// Print startup banner
 	printBanner(cfg)
 
@@ -72,9 +113,11 @@ func main() {
 	<-quit
 
 	slog.Info("shutting down...")
+
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
+	grpcServer.GracefulStop()
 	if err := srv.Shutdown(ctx); err != nil {
 		slog.Error("HTTP server shutdown error", "error", err)
 	}
@@ -103,6 +146,7 @@ func printBanner(cfg server.Config) {
 	fmt.Printf("  AMQP URL:           %s\n", cfg.AMQPURL)
 	fmt.Println()
 	fmt.Printf("  HTTP Server:        http://localhost:%s\n", cfg.Port)
+	fmt.Printf("  gRPC Server:        localhost:%s\n", cfg.GRPCPort)
 	fmt.Println()
 
 	if cfg.APIKey != "" {
