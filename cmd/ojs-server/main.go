@@ -25,13 +25,9 @@ import (
 
 func main() {
 	cfg := server.LoadConfig()
-	if cfg.APIKey == "" && !cfg.AllowInsecureNoAuth {
-		slog.Error("refusing to start without API authentication",
-			"hint", "set OJS_API_KEY or OJS_ALLOW_INSECURE_NO_AUTH=true for local development")
+	if err := cfg.BaseConfig.Validate(); err != nil {
+		slog.Error("configuration error", "error", err)
 		os.Exit(1)
-	}
-	if cfg.AllowInsecureNoAuth {
-		slog.Warn("⚠️  RUNNING WITHOUT AUTHENTICATION — set OJS_API_KEY for production")
 	}
 
 	// Initialize OpenTelemetry tracing (no-op if not configured)

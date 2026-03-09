@@ -116,6 +116,8 @@ func NewRouter(backend commoncore.Backend, cfg Config, publisher commoncore.Even
 	// System
 	r.Get("/ojs/manifest", systemHandler.Manifest)
 	r.Get("/ojs/v1/health", systemHandler.Health)
+r.Get("/healthz", systemHandler.Healthz)
+r.Get("/readyz", systemHandler.Readyz)
 
 	// Jobs
 	r.Post("/ojs/v1/jobs", jobHandler.Create)
