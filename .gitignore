@@ -25,3 +25,8 @@ Thumbs.db
 # Coverage
 coverage.out
 coverage.html
+
+# Environment
+.env
+.env.local
+.env.*.local

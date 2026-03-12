@@ -1,6 +1,6 @@
 # ojs-backend-amqp
 
-A RabbitMQ-backed implementation of the [OpenJobSpec (OJS)](https://github.com/openjobspec) specification — a standard interface for distributed job queues and workflow orchestration. This backend uses AMQP 0-9-1 direct exchanges for queue routing, dead letter exchanges for retry/DLQ, and an in-memory state store for job metadata with automatic RabbitMQ reconnection.
+A RabbitMQ-backed implementation of the [OpenJobSpec (OJS)](https://github.com/openjobspec) specification — a standard interface for distributed job queues and workflow orchestration. This backend uses AMQP 0-9-1 direct exchanges for queue routing, dead letter exchanges for retry/DLQ, and SQLite-backed durable state persistence with automatic RabbitMQ reconnection.
 
 ## Key Features
 
@@ -168,7 +168,7 @@ Each OJS queue maps to:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AMQP_URL` | `amqp://guest:guest@localhost:5672/` | RabbitMQ connection string |
-| `OJS_PERSIST` | — | Optional SQLite path for durable state (e.g., `./ojs-amqp.db`) |
+| `OJS_PERSIST` | `ojs-amqp.db` | SQLite path for durable state persistence (set to empty string to disable) |
 | `OJS_PORT` | `8080` | HTTP server port |
 | `OJS_GRPC_PORT` | `9090` | gRPC server port |
 | `OJS_API_KEY` | — | API key for authentication (required in production) |
@@ -258,7 +258,7 @@ make conformance-level-4    # Advanced: priority, unique jobs, batch enqueue, qu
 
 ## Design Decisions
 
-- **In-memory state + AMQP routing**: Job metadata lives in memory for fast access; RabbitMQ handles message delivery and ordering. This trades durability (restart loses state) for simplicity and performance. Optional SQLite persistence (`OJS_PERSIST`) restores state across restarts.
+- **SQLite-backed state + AMQP routing**: Job metadata is persisted to SQLite (enabled by default via `OJS_PERSIST=ojs-amqp.db`) for durability across restarts; RabbitMQ handles message delivery and ordering. Set `OJS_PERSIST=""` to disable persistence for pure in-memory operation.
 - **Shared API handlers**: HTTP/gRPC routing uses `ojs-go-backend-common/api` handlers, ensuring API consistency with all other OJS backends.
 - **Auto-reconnection**: The connection monitor detects RabbitMQ disconnections and reconnects with a 3-second backoff, re-declaring exchanges and queues on reconnection.
 - **Event fanout**: Job lifecycle events are published to the `ojs.events` fanout exchange, enabling SSE subscriptions and external event consumers.

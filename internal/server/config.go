@@ -20,6 +20,6 @@ func LoadConfig() Config {
 	return Config{
 		BaseConfig:  base,
 		AMQPURL:     commonconfig.GetEnv("AMQP_URL", "amqp://guest:guest@localhost:5672/"),
-		PersistPath: commonconfig.GetEnv("OJS_PERSIST", ""),
+		PersistPath: commonconfig.GetEnv("OJS_PERSIST", "ojs-amqp.db"),
 	}
 }

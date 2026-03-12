@@ -38,11 +38,13 @@ func main() {
 		defer otelShutdown()
 	}
 
-	// Create AMQP backend
+	// Create AMQP backend with SQLite persistence enabled by default
 	var backendOpts []amqpbackend.Option
 	if cfg.PersistPath != "" {
 		backendOpts = append(backendOpts, amqpbackend.WithPersist(cfg.PersistPath))
 		slog.Info("persistence enabled", "path", cfg.PersistPath)
+	} else {
+		slog.Warn("persistence disabled — set OJS_PERSIST to enable durable state")
 	}
 	backend, err := amqpbackend.New(cfg.AMQPURL, backendOpts...)
 	if err != nil {
