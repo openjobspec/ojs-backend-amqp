@@ -3,6 +3,7 @@ package amqp
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"sync"
 
 	"github.com/openjobspec/ojs-go-backend-common/core"
@@ -48,7 +49,9 @@ func (s *sqliteStore) SaveJob(job *core.Job) error {
 	if err != nil {
 		return err
 	}
-	_, _ = s.db.Exec("INSERT OR IGNORE INTO job_order (job_id) VALUES (?)", job.ID)
+	if _, err := s.db.Exec("INSERT OR IGNORE INTO job_order (job_id) VALUES (?)", job.ID); err != nil {
+		return fmt.Errorf("insert job order: %w", err)
+	}
 	return nil
 }
 
@@ -59,7 +62,9 @@ func (s *sqliteStore) DeleteJob(id string) error {
 	if err != nil {
 		return err
 	}
-	_, _ = s.db.Exec("DELETE FROM job_order WHERE job_id = ?", id)
+	if _, err := s.db.Exec("DELETE FROM job_order WHERE job_id = ?", id); err != nil {
+		return fmt.Errorf("delete job order: %w", err)
+	}
 	return nil
 }
 
