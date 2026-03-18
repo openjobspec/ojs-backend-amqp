@@ -1,4 +1,5 @@
 # ojs-backend-amqp
+[![Stability: beta](https://img.shields.io/badge/stability-beta-yellow.svg)](https://github.com/openjobspec/openjobspec/blob/main/STABILITY.md)
 
 A RabbitMQ-backed implementation of the [OpenJobSpec (OJS)](https://github.com/openjobspec) specification — a standard interface for distributed job queues and workflow orchestration. This backend uses AMQP 0-9-1 direct exchanges for queue routing, dead letter exchanges for retry/DLQ, and SQLite-backed durable state persistence with automatic RabbitMQ reconnection.
 
