@@ -338,7 +338,11 @@ func (b *Backend) Nack(_ context.Context, jobID string, jobErr *core.JobError, r
 		if jobErr.Type == "" && jobErr.Code != "" {
 			jobErr.Type = jobErr.Code
 		}
-		errJSON, _ := json.Marshal(jobErr)
+		errJSON, marshalErr := json.Marshal(jobErr)
+		if marshalErr != nil {
+			slog.Warn("nack: failed to marshal job error", "job_id", job.ID, "error", marshalErr)
+			errJSON = []byte(`{"message":"marshal error"}`)
+		}
 		job.Error = errJSON
 	}
 

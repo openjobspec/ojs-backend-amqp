@@ -22,6 +22,7 @@ type SchedulerBackend interface {
 type Scheduler struct {
 	backend  SchedulerBackend
 	stop     chan struct{}
+	wg       sync.WaitGroup
 	stopOnce sync.Once
 }
 
@@ -35,6 +36,7 @@ func New(backend SchedulerBackend) *Scheduler {
 
 // Start launches the background goroutines.
 func (s *Scheduler) Start() {
+	s.wg.Add(5)
 	go s.runLoop("scheduled-promoter", 1*time.Second, s.backend.PromoteScheduled)
 	go s.runLoop("retry-promoter", 200*time.Millisecond, s.backend.PromoteRetries)
 	go s.runLoop("stalled-reaper", 500*time.Millisecond, s.backend.RequeueStalled)
@@ -43,12 +45,15 @@ func (s *Scheduler) Start() {
 	slog.Info("AMQP scheduler started")
 }
 
-// Stop gracefully shuts down all background goroutines. Safe to call multiple times.
+// Stop gracefully shuts down all background goroutines and waits for them
+// to finish. Safe to call multiple times.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() { close(s.stop) })
+	s.wg.Wait()
 }
 
 func (s *Scheduler) runLoop(name string, interval time.Duration, fn func(context.Context) error) {
+	defer s.wg.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
